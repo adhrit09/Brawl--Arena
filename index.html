@@ -1,0 +1,1092 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Brawl Arena</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      overflow: hidden;
+      font-family: 'Courier New', monospace;
+    }
+    #root {
+      width: 100vw;
+      height: 100vh;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://game-cdn.poki.com/scripts/v2/poki-sdk.js"></script>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const BrawlGame = () => {
+      const canvasRef = useRef(null);
+      const [gameState, setGameState] = useState('loading');
+      const [winner, setWinner] = useState(null);
+      const musicStartedRef = useRef(false);
+      const pokiInitializedRef = useRef(false);
+      
+      const gameRef = useRef({
+        players: [
+          {
+            x: 150,
+            y: 300,
+            vx: 0,
+            vy: 0,
+            width: 40,
+            height: 50,
+            color: '#FF3366',
+            damage: 0,
+            stocks: 3,
+            facing: 1,
+            grounded: false,
+            jumps: 0,
+            attacking: false,
+            attackFrame: 0,
+            stunned: 0,
+            superAttacking: false,
+            superAttackFrame: 0,
+            superCooldown: 0,
+            keys: { left: 'a', right: 'd', jump: 'w', attack: 's', super: 'q' }
+          },
+          {
+            x: 550,
+            y: 300,
+            vx: 0,
+            vy: 0,
+            width: 40,
+            height: 50,
+            color: '#33CCFF',
+            damage: 0,
+            stocks: 3,
+            facing: -1,
+            grounded: false,
+            jumps: 0,
+            attacking: false,
+            attackFrame: 0,
+            stunned: 0,
+            superAttacking: false,
+            superAttackFrame: 0,
+            superCooldown: 0,
+            keys: { left: 'arrowleft', right: 'arrowright', jump: 'arrowup', attack: 'arrowdown', super: 'shift' }
+          }
+        ],
+        platforms: [
+          { x: 200, y: 500, width: 400, height: 20 },
+          { x: 150, y: 380, width: 150, height: 15 },
+          { x: 500, y: 380, width: 150, height: 15 },
+          { x: 300, y: 280, width: 200, height: 15 }
+        ],
+        keys: {},
+        particles: []
+      });
+
+      // Initialize Poki SDK
+      useEffect(() => {
+        if (!pokiInitializedRef.current && typeof PokiSDK !== 'undefined') {
+          PokiSDK.init().then(() => {
+            console.log('Poki SDK initialized successfully');
+            pokiInitializedRef.current = true;
+            // Notify Poki that loading is complete
+            PokiSDK.gameLoadingFinished();
+            setGameState('menu');
+          }).catch(() => {
+            console.log('Poki SDK failed to initialize, continuing anyway');
+            pokiInitializedRef.current = true;
+            setGameState('menu');
+          });
+        } else if (typeof PokiSDK === 'undefined') {
+          // If Poki SDK is not available (local testing), just go to menu
+          console.log('Poki SDK not found, running without it');
+          setGameState('menu');
+        }
+      }, []);
+
+      useEffect(() => {
+        if (gameState !== 'playing') return;
+
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext('2d');
+        const game = gameRef.current;
+        let animationFrameId = null;
+
+        const GRAVITY = 0.6;
+        const MOVE_SPEED = 5;
+        const JUMP_POWER = 12;
+        const MAX_JUMPS = 2;
+        const ATTACK_RANGE = 60;
+        const ATTACK_DURATION = 15;
+        const SUPER_ATTACK_RANGE = 120;
+        const SUPER_ATTACK_DURATION = 25;
+        const SUPER_COOLDOWN = 300; // 5 seconds at 60fps
+        const BLAST_ZONE = 650;
+
+        const handleKeyDown = (e) => {
+          game.keys[e.key.toLowerCase()] = true;
+        };
+
+        const handleKeyUp = (e) => {
+          game.keys[e.key.toLowerCase()] = false;
+        };
+
+        window.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('keyup', handleKeyUp);
+
+        const checkPlatformCollision = (player) => {
+          player.grounded = false;
+          
+          for (const platform of game.platforms) {
+            if (player.x + player.width > platform.x &&
+                player.x < platform.x + platform.width &&
+                player.y + player.height >= platform.y &&
+                player.y + player.height <= platform.y + 20 &&
+                player.vy >= 0) {
+              player.y = platform.y - player.height;
+              player.vy = 0;
+              player.grounded = true;
+              player.jumps = 0;
+              return true;
+            }
+          }
+          return false;
+        };
+
+        const createParticles = (x, y, color, count = 8) => {
+          for (let i = 0; i < count; i++) {
+            game.particles.push({
+              x,
+              y,
+              vx: (Math.random() - 0.5) * 10,
+              vy: (Math.random() - 0.5) * 10,
+              life: 30,
+              color
+            });
+          }
+        };
+
+        const drawPlayer1Character = (x, y, facing, stunned) => {
+          if (stunned % 4 >= 2 && stunned !== 0) return;
+          
+          ctx.save();
+          ctx.translate(x + 20, y);
+          if (facing < 0) {
+            ctx.scale(-1, 1);
+          }
+          
+          ctx.fillStyle = '#D97B2A';
+          ctx.fillRect(-15, 20, 30, 25);
+          
+          ctx.fillStyle = '#B86825';
+          ctx.fillRect(-12, 45, 10, 15);
+          ctx.fillRect(2, 45, 10, 15);
+          
+          ctx.fillStyle = '#D97B2A';
+          ctx.fillRect(-18, 22, 8, 20);
+          ctx.fillRect(10, 22, 8, 20);
+          
+          ctx.fillStyle = '#E8A040';
+          ctx.fillRect(-18, 35, 8, 8);
+          ctx.fillRect(10, 35, 8, 8);
+          
+          ctx.fillStyle = '#FFDBAC';
+          ctx.beginPath();
+          ctx.arc(0, 10, 12, 0, Math.PI * 2);
+          ctx.fill();
+          
+          ctx.fillStyle = '#F4D03F';
+          ctx.fillRect(-10, -5, 20, 10);
+          
+          ctx.beginPath();
+          ctx.moveTo(-8, -5);
+          ctx.lineTo(-10, -12);
+          ctx.lineTo(-5, -8);
+          ctx.fill();
+          
+          ctx.beginPath();
+          ctx.moveTo(-2, -5);
+          ctx.lineTo(-3, -15);
+          ctx.lineTo(2, -10);
+          ctx.fill();
+          
+          ctx.beginPath();
+          ctx.moveTo(5, -5);
+          ctx.lineTo(4, -13);
+          ctx.lineTo(8, -8);
+          ctx.fill();
+          
+          ctx.beginPath();
+          ctx.moveTo(10, -2);
+          ctx.lineTo(13, -8);
+          ctx.lineTo(10, -5);
+          ctx.fill();
+          
+          ctx.fillStyle = '#D4AF37';
+          ctx.fillRect(-10, 2, 20, 3);
+          
+          ctx.fillStyle = '#4A90E2';
+          ctx.fillRect(-7, 8, 4, 3);
+          ctx.fillRect(3, 8, 4, 3);
+          
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(-6, 8, 2, 1);
+          ctx.fillRect(4, 8, 2, 1);
+          
+          ctx.strokeStyle = '#333333';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(0, 14, 3, 0, Math.PI);
+          ctx.stroke();
+          
+          ctx.fillStyle = '#A85A1F';
+          ctx.fillRect(-8, 28, 16, 3);
+          ctx.fillRect(-2, 20, 4, 25);
+          
+          ctx.fillStyle = '#333333';
+          ctx.fillRect(-15, 43, 30, 3);
+          
+          ctx.restore();
+        };
+
+        const drawPlayer2Character = (x, y, facing, stunned) => {
+          if (stunned % 4 >= 2 && stunned !== 0) return;
+          
+          ctx.save();
+          ctx.translate(x + 20, y);
+          if (facing < 0) {
+            ctx.scale(-1, 1);
+          }
+          
+          ctx.fillStyle = '#F4C430';
+          ctx.fillRect(-12, 45, 10, 15);
+          ctx.fillRect(2, 45, 10, 15);
+          
+          ctx.fillStyle = '#D4A017';
+          ctx.fillRect(-12, 45, 10, 3);
+          ctx.fillRect(2, 45, 10, 3);
+          
+          ctx.fillStyle = '#8B6914';
+          ctx.fillRect(-15, 20, 30, 25);
+          
+          ctx.fillStyle = '#A0826D';
+          ctx.fillRect(-10, 22, 20, 3);
+          ctx.fillRect(-12, 28, 24, 2);
+          
+          ctx.fillStyle = '#8B6914';
+          ctx.fillRect(-18, 22, 8, 20);
+          ctx.fillRect(10, 22, 8, 20);
+          
+          ctx.fillStyle = '#F4C430';
+          ctx.fillRect(-18, 35, 8, 8);
+          ctx.fillRect(10, 35, 8, 8);
+          
+          ctx.fillStyle = '#654321';
+          ctx.fillRect(-15, 43, 30, 3);
+          
+          ctx.fillStyle = '#FFDBAC';
+          ctx.beginPath();
+          ctx.arc(0, 10, 12, 0, Math.PI * 2);
+          ctx.fill();
+          
+          ctx.fillStyle = '#FF8C42';
+          ctx.fillRect(-12, 2, 24, 5);
+          
+          ctx.fillStyle = '#87CEEB';
+          ctx.fillRect(-10, 3, 7, 3);
+          ctx.fillRect(3, 3, 7, 3);
+          
+          ctx.fillStyle = '#6B4423';
+          ctx.fillRect(-11, -3, 22, 8);
+          ctx.fillRect(-13, 0, 4, 10);
+          ctx.fillRect(9, 0, 4, 10);
+          
+          ctx.fillRect(-14, 5, 6, 8);
+          ctx.fillRect(-15, 10, 5, 6);
+          
+          ctx.fillStyle = '#8B6914';
+          ctx.fillRect(-9, -1, 3, 2);
+          ctx.fillRect(2, -1, 3, 2);
+          
+          ctx.fillStyle = '#2C5F2D';
+          ctx.fillRect(-7, 10, 4, 3);
+          ctx.fillRect(3, 10, 4, 3);
+          
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(-6, 10, 2, 1);
+          ctx.fillRect(4, 10, 2, 1);
+          
+          ctx.fillStyle = '#E8B89A';
+          ctx.fillRect(-1, 12, 2, 3);
+          
+          ctx.strokeStyle = '#333333';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(0, 16, 3, 0, Math.PI);
+          ctx.stroke();
+          
+          ctx.fillStyle = '#654321';
+          ctx.fillRect(-2, 20, 4, 23);
+          
+          ctx.restore();
+        };
+
+        const checkAttackHit = (attacker, defender) => {
+          const hitboxX = attacker.x + (attacker.facing > 0 ? attacker.width : -ATTACK_RANGE);
+          const hitboxY = attacker.y;
+          
+          if (defender.x + defender.width > hitboxX &&
+              defender.x < hitboxX + ATTACK_RANGE &&
+              defender.y + defender.height > hitboxY &&
+              defender.y < hitboxY + attacker.height) {
+            
+            const knockback = (defender.damage / 100 + 0.5) * 15;
+            defender.vx = attacker.facing * knockback * 0.8;
+            defender.vy = -knockback * 0.6;
+            defender.damage += 12;
+            defender.stunned = 20;
+            
+            const hitSynth = new Tone.MembraneSynth({
+              pitchDecay: 0.05,
+              octaves: 4,
+              oscillator: { type: 'sine' },
+              envelope: {
+                attack: 0.001,
+                decay: 0.4,
+                sustain: 0.01,
+                release: 0.4,
+              }
+            }).toDestination();
+            hitSynth.volume.value = -10;
+            hitSynth.triggerAttackRelease('C1', '8n');
+            
+            createParticles(
+              defender.x + defender.width / 2,
+              defender.y + defender.height / 2,
+              '#FFD700',
+              12
+            );
+            
+            return true;
+          }
+          return false;
+        };
+
+        const checkSuperAttackHit = (attacker, defender) => {
+          const hitboxX = attacker.x + (attacker.facing > 0 ? attacker.width : -SUPER_ATTACK_RANGE);
+          const hitboxY = attacker.y - 20;
+          
+          if (defender.x + defender.width > hitboxX &&
+              defender.x < hitboxX + SUPER_ATTACK_RANGE &&
+              defender.y + defender.height > hitboxY &&
+              defender.y < hitboxY + attacker.height + 40) {
+            
+            const knockback = (defender.damage / 100 + 1) * 25;
+            defender.vx = attacker.facing * knockback * 1.2;
+            defender.vy = -knockback * 0.8;
+            defender.damage += 25;
+            defender.stunned = 40;
+            
+            const superHitSynth = new Tone.MembraneSynth({
+              pitchDecay: 0.08,
+              octaves: 6,
+              oscillator: { type: 'sine' },
+              envelope: {
+                attack: 0.001,
+                decay: 0.6,
+                sustain: 0.01,
+                release: 0.6,
+              }
+            }).toDestination();
+            superHitSynth.volume.value = -8;
+            superHitSynth.triggerAttackRelease('C1', '4n');
+            
+            setTimeout(() => {
+              const explosionSynth = new Tone.Synth({
+                oscillator: { type: 'sawtooth' },
+                envelope: {
+                  attack: 0.001,
+                  decay: 0.3,
+                  sustain: 0,
+                  release: 0.3,
+                }
+              }).toDestination();
+              explosionSynth.volume.value = -12;
+              explosionSynth.triggerAttackRelease('E2', '8n');
+            }, 50);
+            
+            createParticles(
+              defender.x + defender.width / 2,
+              defender.y + defender.height / 2,
+              '#FF00FF',
+              25
+            );
+            
+            return true;
+          }
+          return false;
+        };
+
+        const respawnPlayer = (player, index) => {
+          player.x = index === 0 ? 150 : 550;
+          player.y = 200;
+          player.vx = 0;
+          player.vy = 0;
+          player.damage = 0;
+          player.stunned = 60;
+          
+          createParticles(player.x + player.width / 2, player.y + player.height / 2, player.color, 20);
+        };
+
+        const gameLoop = () => {
+          ctx.fillStyle = '#0A0E27';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+          const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+          gradient.addColorStop(0, '#1a1a3e');
+          gradient.addColorStop(1, '#0A0E27');
+          ctx.fillStyle = gradient;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+          ctx.strokeStyle = '#ffffff11';
+          ctx.lineWidth = 2;
+          for (let i = 0; i < 5; i++) {
+            ctx.strokeRect(50 + i * 150, 50 + i * 100, 100, 100);
+          }
+
+          game.particles = game.particles.filter(p => {
+            p.x += p.vx;
+            p.y += p.vy;
+            p.vy += 0.3;
+            p.life--;
+            
+            if (p.life > 0) {
+              ctx.globalAlpha = p.life / 30;
+              ctx.fillStyle = p.color;
+              ctx.fillRect(p.x, p.y, 4, 4);
+              ctx.globalAlpha = 1;
+              return true;
+            }
+            return false;
+          });
+
+          game.platforms.forEach(platform => {
+            ctx.fillStyle = '#2D3561';
+            ctx.fillRect(platform.x, platform.y, platform.width, platform.height);
+            
+            ctx.fillStyle = '#4A5899';
+            ctx.fillRect(platform.x, platform.y, platform.width, 5);
+            
+            ctx.strokeStyle = '#6B7BB8';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(platform.x, platform.y, platform.width, platform.height);
+          });
+
+          game.players.forEach((player, index) => {
+            if (player.stunned > 0) {
+              player.stunned--;
+            }
+
+            if (player.stunned === 0) {
+              if (game.keys[player.keys.left]) {
+                player.vx = -MOVE_SPEED;
+                player.facing = -1;
+              } else if (game.keys[player.keys.right]) {
+                player.vx = MOVE_SPEED;
+                player.facing = 1;
+              } else {
+                player.vx *= 0.8;
+              }
+
+              if (game.keys[player.keys.jump] && player.jumps < MAX_JUMPS) {
+                player.vy = -JUMP_POWER;
+                player.jumps++;
+                game.keys[player.keys.jump] = false;
+                
+                const jumpSynth = new Tone.Synth({
+                  oscillator: { type: 'sine' },
+                  envelope: {
+                    attack: 0.001,
+                    decay: 0.1,
+                    sustain: 0.0,
+                    release: 0.1,
+                  }
+                }).toDestination();
+                jumpSynth.volume.value = -15;
+                jumpSynth.triggerAttackRelease('A4', '16n');
+                
+                createParticles(player.x + player.width / 2, player.y + player.height, player.color, 5);
+              }
+
+              if (game.keys[player.keys.attack] && !player.attacking) {
+                player.attacking = true;
+                player.attackFrame = 0;
+                game.keys[player.keys.attack] = false;
+              }
+
+              if (game.keys[player.keys.super] && !player.superAttacking && player.superCooldown === 0) {
+                player.superAttacking = true;
+                player.superAttackFrame = 0;
+                player.superCooldown = SUPER_COOLDOWN;
+                game.keys[player.keys.super] = false;
+                
+                // Super attack charge sound
+                const chargeSynth = new Tone.Synth({
+                  oscillator: { type: 'square' },
+                  envelope: {
+                    attack: 0.01,
+                    decay: 0.2,
+                    sustain: 0.3,
+                    release: 0.2,
+                  }
+                }).toDestination();
+                chargeSynth.volume.value = -10;
+                chargeSynth.triggerAttackRelease('C5', '8n');
+                setTimeout(() => chargeSynth.triggerAttackRelease('E5', '8n'), 100);
+              }
+            }
+
+            if (player.attacking) {
+              player.attackFrame++;
+              
+              if (player.attackFrame === 5) {
+                const otherPlayer = game.players[1 - index];
+                checkAttackHit(player, otherPlayer);
+              }
+              
+              if (player.attackFrame >= ATTACK_DURATION) {
+                player.attacking = false;
+                player.attackFrame = 0;
+              }
+            }
+
+            if (player.superAttacking) {
+              player.superAttackFrame++;
+              
+              if (player.superAttackFrame === 8) {
+                const otherPlayer = game.players[1 - index];
+                checkSuperAttackHit(player, otherPlayer);
+              }
+              
+              if (player.superAttackFrame >= SUPER_ATTACK_DURATION) {
+                player.superAttacking = false;
+                player.superAttackFrame = 0;
+              }
+            }
+
+            if (player.superCooldown > 0) {
+              player.superCooldown--;
+            }
+
+            player.vy += GRAVITY;
+            player.x += player.vx;
+            player.y += player.vy;
+
+            checkPlatformCollision(player);
+
+            if (player.y > BLAST_ZONE || player.y < -50 || 
+                player.x < -50 || player.x > canvas.width + 50) {
+              player.stocks--;
+              
+              const koSynth = new Tone.Synth({
+                oscillator: { type: 'sawtooth' },
+                envelope: {
+                  attack: 0.001,
+                  decay: 0.3,
+                  sustain: 0.0,
+                  release: 0.5,
+                }
+              }).toDestination();
+              koSynth.volume.value = -12;
+              koSynth.triggerAttackRelease('C3', '4n');
+              setTimeout(() => koSynth.triggerAttackRelease('A2', '4n'), 150);
+              
+              if (player.stocks <= 0) {
+                // Notify Poki that gameplay has stopped
+                if (typeof PokiSDK !== 'undefined') {
+                  PokiSDK.gameplayStop();
+                }
+                setWinner(index === 0 ? 2 : 1);
+                setGameState('gameover');
+                return;
+              }
+              
+              respawnPlayer(player, index);
+            }
+
+            if (index === 0) {
+              drawPlayer1Character(player.x, player.y, player.facing, player.stunned);
+              
+              if (player.attacking && player.attackFrame < 8) {
+                ctx.fillStyle = '#FFD700';
+                ctx.globalAlpha = 0.6;
+                const hitboxX = player.x + (player.facing > 0 ? player.width : -ATTACK_RANGE);
+                ctx.fillRect(hitboxX, player.y, ATTACK_RANGE, player.height);
+                ctx.globalAlpha = 1;
+              }
+
+              if (player.superAttacking && player.superAttackFrame < 15) {
+                ctx.fillStyle = '#FF00FF';
+                ctx.globalAlpha = 0.7;
+                const hitboxX = player.x + (player.facing > 0 ? player.width : -SUPER_ATTACK_RANGE);
+                ctx.fillRect(hitboxX, player.y - 20, SUPER_ATTACK_RANGE, player.height + 40);
+                
+                // Pulsing effect
+                ctx.strokeStyle = '#FFFFFF';
+                ctx.lineWidth = 3;
+                ctx.globalAlpha = 0.5 + Math.sin(player.superAttackFrame * 0.5) * 0.3;
+                ctx.strokeRect(hitboxX, player.y - 20, SUPER_ATTACK_RANGE, player.height + 40);
+                ctx.globalAlpha = 1;
+              }
+            } else {
+              drawPlayer2Character(player.x, player.y, player.facing, player.stunned);
+              
+              if (player.attacking && player.attackFrame < 8) {
+                ctx.fillStyle = '#FFD700';
+                ctx.globalAlpha = 0.6;
+                const hitboxX = player.x + (player.facing > 0 ? player.width : -ATTACK_RANGE);
+                ctx.fillRect(hitboxX, player.y, ATTACK_RANGE, player.height);
+                ctx.globalAlpha = 1;
+              }
+
+              if (player.superAttacking && player.superAttackFrame < 15) {
+                ctx.fillStyle = '#FF00FF';
+                ctx.globalAlpha = 0.7;
+                const hitboxX = player.x + (player.facing > 0 ? player.width : -SUPER_ATTACK_RANGE);
+                ctx.fillRect(hitboxX, player.y - 20, SUPER_ATTACK_RANGE, player.height + 40);
+                
+                ctx.strokeStyle = '#FFFFFF';
+                ctx.lineWidth = 3;
+                ctx.globalAlpha = 0.5 + Math.sin(player.superAttackFrame * 0.5) * 0.3;
+                ctx.strokeRect(hitboxX, player.y - 20, SUPER_ATTACK_RANGE, player.height + 40);
+                ctx.globalAlpha = 1;
+              }
+            }
+          });
+
+          ctx.font = 'bold 24px "Courier New"';
+          ctx.textAlign = 'left';
+          
+          ctx.fillStyle = game.players[0].color;
+          ctx.fillText(`P1`, 20, 40);
+          ctx.fillText(`${Math.floor(game.players[0].damage)}%`, 20, 70);
+          
+          for (let i = 0; i < game.players[0].stocks; i++) {
+            ctx.fillRect(20 + i * 25, 85, 18, 18);
+          }
+          
+          // Player 1 Super cooldown
+          ctx.fillStyle = '#FFFFFF';
+          ctx.font = 'bold 16px "Courier New"';
+          ctx.textAlign = 'left';
+          ctx.fillText('SUPER', 20, 120);
+          
+          const cooldownPercent1 = 1 - (game.players[0].superCooldown / SUPER_COOLDOWN);
+          ctx.fillStyle = '#333333';
+          ctx.fillRect(20, 125, 100, 10);
+          
+          if (game.players[0].superCooldown > 0) {
+            ctx.fillStyle = '#FF00FF';
+            ctx.fillRect(20, 125, 100 * cooldownPercent1, 10);
+          } else {
+            ctx.fillStyle = '#00FF00';
+            ctx.fillRect(20, 125, 100, 10);
+            
+            // Ready indicator pulse
+            ctx.globalAlpha = 0.5 + Math.sin(Date.now() * 0.01) * 0.5;
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillText('READY!', 20, 150);
+            ctx.globalAlpha = 1;
+          }
+          
+          ctx.textAlign = 'right';
+          ctx.fillStyle = game.players[1].color;
+          ctx.fillText(`P2`, canvas.width - 20, 40);
+          ctx.fillText(`${Math.floor(game.players[1].damage)}%`, canvas.width - 20, 70);
+          
+          for (let i = 0; i < game.players[1].stocks; i++) {
+            ctx.fillRect(canvas.width - 20 - (i + 1) * 25, 85, 18, 18);
+          }
+          
+          // Player 2 Super cooldown
+          ctx.fillStyle = '#FFFFFF';
+          ctx.font = 'bold 16px "Courier New"';
+          ctx.textAlign = 'right';
+          ctx.fillText('SUPER', canvas.width - 20, 120);
+          
+          const cooldownPercent2 = 1 - (game.players[1].superCooldown / SUPER_COOLDOWN);
+          ctx.fillStyle = '#333333';
+          ctx.fillRect(canvas.width - 120, 125, 100, 10);
+          
+          if (game.players[1].superCooldown > 0) {
+            ctx.fillStyle = '#FF00FF';
+            ctx.fillRect(canvas.width - 120, 125, 100 * cooldownPercent2, 10);
+          } else {
+            ctx.fillStyle = '#00FF00';
+            ctx.fillRect(canvas.width - 120, 125, 100, 10);
+            
+            ctx.globalAlpha = 0.5 + Math.sin(Date.now() * 0.01) * 0.5;
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillText('READY!', canvas.width - 20, 150);
+            ctx.globalAlpha = 1;
+          }
+
+          animationFrameId = requestAnimationFrame(gameLoop);
+        };
+
+        animationFrameId = requestAnimationFrame(gameLoop);
+
+        return () => {
+          if (animationFrameId) {
+            cancelAnimationFrame(animationFrameId);
+          }
+          window.removeEventListener('keydown', handleKeyDown);
+          window.removeEventListener('keyup', handleKeyUp);
+        };
+      }, [gameState]);
+
+      const startGame = () => {
+        const game = gameRef.current;
+        
+        // Notify Poki that gameplay has started
+        if (typeof PokiSDK !== 'undefined') {
+          PokiSDK.gameplayStart();
+        }
+        
+        if (!musicStartedRef.current) {
+          Tone.start().then(() => {
+            const synth = new Tone.PolySynth(Tone.Synth, {
+              oscillator: { type: 'square' },
+              envelope: {
+                attack: 0.005,
+                decay: 0.1,
+                sustain: 0.3,
+                release: 0.1,
+              },
+            }).toDestination();
+            
+            const bass = new Tone.MonoSynth({
+              oscillator: { type: 'sawtooth' },
+              envelope: {
+                attack: 0.01,
+                decay: 0.2,
+                sustain: 0.2,
+                release: 0.4,
+              },
+            }).toDestination();
+            
+            synth.volume.value = -8;
+            bass.volume.value = -12;
+            
+            const melodyPattern = new Tone.Pattern((time, note) => {
+              synth.triggerAttackRelease(note, '8n', time);
+            }, ['C5', 'E5', 'G5', 'E5', 'A5', 'G5', 'E5', 'C5'], 'up');
+            
+            const bassPattern = new Tone.Pattern((time, note) => {
+              bass.triggerAttackRelease(note, '4n', time);
+            }, ['C2', 'C2', 'G2', 'A2'], 'up');
+            
+            melodyPattern.interval = '8n';
+            bassPattern.interval = '4n';
+            
+            Tone.Transport.bpm.value = 140;
+            Tone.Transport.start();
+            melodyPattern.start(0);
+            bassPattern.start(0);
+            
+            musicStartedRef.current = true;
+          });
+        }
+        
+        game.keys = {};
+        
+        game.players[0].damage = 0;
+        game.players[0].stocks = 3;
+        game.players[0].x = 150;
+        game.players[0].y = 300;
+        game.players[0].vx = 0;
+        game.players[0].vy = 0;
+        game.players[0].jumps = 0;
+        game.players[0].grounded = false;
+        game.players[0].attacking = false;
+        game.players[0].attackFrame = 0;
+        game.players[0].stunned = 0;
+        game.players[0].superAttacking = false;
+        game.players[0].superAttackFrame = 0;
+        game.players[0].superCooldown = 0;
+        
+        game.players[1].damage = 0;
+        game.players[1].stocks = 3;
+        game.players[1].x = 550;
+        game.players[1].y = 300;
+        game.players[1].vx = 0;
+        game.players[1].vy = 0;
+        game.players[1].jumps = 0;
+        game.players[1].grounded = false;
+        game.players[1].attacking = false;
+        game.players[1].attackFrame = 0;
+        game.players[1].stunned = 0;
+        game.players[1].superAttacking = false;
+        game.players[1].superAttackFrame = 0;
+        game.players[1].superCooldown = 0;
+        
+        game.particles = [];
+        
+        setWinner(null);
+        setGameState('playing');
+      };
+
+      const handleRematch = () => {
+        // Show commercial break before rematch (Poki ads)
+        if (typeof PokiSDK !== 'undefined') {
+          PokiSDK.commercialBreak().then(() => {
+            startGame();
+          }).catch(() => {
+            // If ad fails, just start the game
+            startGame();
+          });
+        } else {
+          startGame();
+        }
+      };
+
+      return (
+        <div style={{
+          width: '100vw',
+          height: '100vh',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+          fontFamily: '"Courier New", monospace',
+          overflow: 'hidden',
+          position: 'relative'
+        }}>
+          <div style={{
+            position: 'absolute',
+            inset: 0,
+            opacity: 0.1,
+            background: 'repeating-linear-gradient(0deg, transparent, transparent 50px, #ffffff22 50px, #ffffff22 51px)',
+            animation: 'scroll 2s linear infinite'
+          }} />
+          
+          <style>{`
+            @keyframes scroll {
+              from { transform: translateY(0); }
+              to { transform: translateY(50px); }
+            }
+            
+            @keyframes pulse {
+              0%, 100% { transform: scale(1); }
+              50% { transform: scale(1.05); }
+            }
+            
+            @keyframes glow {
+              0%, 100% { box-shadow: 0 0 20px rgba(255, 255, 255, 0.5); }
+              50% { box-shadow: 0 0 40px rgba(255, 255, 255, 0.8); }
+            }
+          `}</style>
+
+          {gameState === 'loading' && (
+            <div style={{
+              textAlign: 'center',
+              zIndex: 10
+            }}>
+              <h1 style={{
+                fontSize: '72px',
+                fontWeight: 'bold',
+                color: '#fff',
+                textShadow: '4px 4px 0 #000',
+                marginBottom: '30px',
+                letterSpacing: '4px'
+              }}>
+                BRAWL ARENA
+              </h1>
+              <div style={{
+                fontSize: '24px',
+                color: '#fff',
+                textShadow: '2px 2px 0 #000'
+              }}>
+                Loading...
+              </div>
+            </div>
+          )}
+
+          {gameState === 'menu' && (
+            <div style={{
+              textAlign: 'center',
+              zIndex: 10,
+              animation: 'pulse 2s ease-in-out infinite'
+            }}>
+              <h1 style={{
+                fontSize: '72px',
+                fontWeight: 'bold',
+                color: '#fff',
+                textShadow: '4px 4px 0 #000, -2px -2px 0 #FF3366, 2px -2px 0 #33CCFF, -2px 2px 0 #FFD700',
+                marginBottom: '20px',
+                letterSpacing: '4px'
+              }}>
+                BRAWL ARENA
+              </h1>
+              
+              <div style={{
+                background: 'rgba(0,0,0,0.5)',
+                padding: '30px',
+                borderRadius: '10px',
+                border: '3px solid #fff',
+                marginBottom: '30px'
+              }}>
+                <h2 style={{ color: '#FF3366', fontSize: '28px', marginBottom: '20px' }}>
+                  PLAYER 1 CONTROLS
+                </h2>
+                <div style={{ color: '#fff', fontSize: '18px', lineHeight: '2' }}>
+                  <div>MOVE: A / D</div>
+                  <div>JUMP: W (Double Jump!)</div>
+                  <div>ATTACK: S</div>
+                  <div style={{ color: '#FF00FF', fontWeight: 'bold' }}>SUPER ATTACK: Q (5s cooldown)</div>
+                </div>
+              </div>
+              
+              <div style={{
+                background: 'rgba(0,0,0,0.5)',
+                padding: '30px',
+                borderRadius: '10px',
+                border: '3px solid #fff',
+                marginBottom: '30px'
+              }}>
+                <h2 style={{ color: '#33CCFF', fontSize: '28px', marginBottom: '20px' }}>
+                  PLAYER 2 CONTROLS
+                </h2>
+                <div style={{ color: '#fff', fontSize: '18px', lineHeight: '2' }}>
+                  <div>MOVE: ← / →</div>
+                  <div>JUMP: ↑ (Double Jump!)</div>
+                  <div>ATTACK: ↓</div>
+                  <div style={{ color: '#FF00FF', fontWeight: 'bold' }}>SUPER ATTACK: Shift (5s cooldown)</div>
+                </div>
+              </div>
+
+              <button
+                onClick={startGame}
+                style={{
+                  fontSize: '36px',
+                  fontWeight: 'bold',
+                  padding: '20px 60px',
+                  background: 'linear-gradient(45deg, #FF3366, #FFD700)',
+                  color: '#fff',
+                  border: '4px solid #fff',
+                  borderRadius: '10px',
+                  cursor: 'pointer',
+                  textShadow: '2px 2px 0 #000',
+                  boxShadow: '0 8px 0 rgba(0,0,0,0.3)',
+                  transform: 'translateY(0)',
+                  transition: 'all 0.1s',
+                  animation: 'glow 1.5s ease-in-out infinite'
+                }}
+                onMouseDown={(e) => {
+                  e.target.style.transform = 'translateY(4px)';
+                  e.target.style.boxShadow = '0 4px 0 rgba(0,0,0,0.3)';
+                }}
+                onMouseUp={(e) => {
+                  e.target.style.transform = 'translateY(0)';
+                  e.target.style.boxShadow = '0 8px 0 rgba(0,0,0,0.3)';
+                }}
+              >
+                START BRAWL
+              </button>
+            </div>
+          )}
+
+          {gameState === 'playing' && (
+            <div style={{ position: 'relative' }}>
+              <canvas
+                ref={canvasRef}
+                width={800}
+                height={600}
+                style={{
+                  border: '6px solid #fff',
+                  borderRadius: '10px',
+                  boxShadow: '0 10px 50px rgba(0,0,0,0.5)',
+                  background: '#0A0E27'
+                }}
+              />
+              <div style={{
+                position: 'absolute',
+                top: '-60px',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                fontSize: '32px',
+                fontWeight: 'bold',
+                color: '#fff',
+                textShadow: '3px 3px 0 #000',
+                letterSpacing: '2px'
+              }}>
+                FIGHT!
+              </div>
+            </div>
+          )}
+
+          {gameState === 'gameover' && (
+            <div style={{
+              textAlign: 'center',
+              zIndex: 10,
+              animation: 'pulse 2s ease-in-out infinite'
+            }}>
+              <h1 style={{
+                fontSize: '96px',
+                fontWeight: 'bold',
+                color: winner === 1 ? '#FF3366' : '#33CCFF',
+                textShadow: '6px 6px 0 #000',
+                marginBottom: '30px'
+              }}>
+                PLAYER {winner} WINS!
+              </h1>
+              
+              <button
+                onClick={handleRematch}
+                style={{
+                  fontSize: '36px',
+                  fontWeight: 'bold',
+                  padding: '20px 60px',
+                  background: 'linear-gradient(45deg, #FFD700, #FF3366)',
+                  color: '#fff',
+                  border: '4px solid #fff',
+                  borderRadius: '10px',
+                  cursor: 'pointer',
+                  textShadow: '2px 2px 0 #000',
+                  boxShadow: '0 8px 0 rgba(0,0,0,0.3)',
+                  transform: 'translateY(0)',
+                  transition: 'all 0.1s'
+                }}
+                onMouseDown={(e) => {
+                  e.target.style.transform = 'translateY(4px)';
+                  e.target.style.boxShadow = '0 4px 0 rgba(0,0,0,0.3)';
+                }}
+                onMouseUp={(e) => {
+                  e.target.style.transform = 'translateY(0)';
+                  e.target.style.boxShadow = '0 8px 0 rgba(0,0,0,0.3)';
+                }}
+              >
+                REMATCH
+              </button>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    ReactDOM.render(<BrawlGame />, document.getElementById('root'));
+  </script>
+</body>
+</html>
